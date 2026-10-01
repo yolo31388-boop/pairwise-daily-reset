@@ -1,6 +1,7 @@
-"""日常任务重置 - 含4个bug"""
+"""日常任务重置"""
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 @dataclass
 class Task:
@@ -10,33 +11,50 @@ class Task:
     created_day: str = ""
 
 class DailyResetSystem:
+    REFRESH_HOUR = 4  # 每日凌晨4点刷新（配置时区）
+
     def __init__(self, timezone="UTC"):
-        self.timezone = timezone  # bug1: 用服务器本地时间
+        self.timezone = timezone
+        self.tz = ZoneInfo(timezone)
         self.tasks: dict[str, Task] = {}
 
+    def _logical_date(self, dt: datetime):
+        # 按配置时区换算，刷新点（凌晨4点）之前仍算前一天
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=self.tz)
+        else:
+            dt = dt.astimezone(self.tz)
+        return (dt - timedelta(hours=self.REFRESH_HOUR)).date()
+
     def is_new_day(self, last_check: datetime, now: datetime) -> bool:
-        # bug1: 用自然日比较，不按固定刷新时间
-        return last_check.date() != now.date()
+        return self._logical_date(last_check) != self._logical_date(now)
+
+    def _generate_task(self, tid: str) -> Task:
+        # 生成新任务，可能抛异常
+        return Task(tid, status="active")
 
     def reset_task(self, tid: str) -> bool:
-        # bug2: 状态转换非事务，中间失败卡住
         task = self.tasks.get(tid)
         if not task:
             return False
+        original_status = task.status
         task.status = "resetting"
-        # 模拟生成新任务
-        new_task = Task(tid, status="active")
+        try:
+            new_task = self._generate_task(tid)
+        except Exception:
+            task.status = original_status  # 失败回滚，不卡在resetting
+            return False
         self.tasks[tid] = new_task
-        task.status = "active"  # 这行不会执行，因为已经替换了
         return True
 
     def submit_task_reward(self, tid: str) -> bool:
-        # bug3: 不检查任务是否过期
         task = self.tasks.get(tid)
         if not task:
             return False
+        if task.status not in ("active", "completed"):
+            return False  # 过期/重置中的任务不能提交奖励
         return True
 
     def reset_weekly_tasks(self, now: datetime) -> bool:
-        # bug4: 按7*24小时算，不按自然周
-        return True
+        # 按自然周重置：周一零点
+        return now.weekday() == 0
